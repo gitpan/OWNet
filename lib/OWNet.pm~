@@ -1,7 +1,7 @@
 package OWNet ;
 
 # OWNet module for perl
-# $Id: OWNet.pm,v 1.5 2007/01/27 03:34:39 alfille Exp $
+# $Id: OWNet.pm,v 1.4 2007/01/23 22:57:23 alfille Exp $
 #
 # Paul H Alfille -- copyright 2007
 # Part of the OWFS suite: 
@@ -180,7 +180,7 @@ my $persistence_bit = 0x04 ;
 my $default_sg = 0x102 ;
 my $default_block = 4096 ;
 
-our $VERSION=(split(/ /,q[$Revision: 1.5 $]))[1] ;
+our $VERSION=(split(/ /,q[$Revision: 1.4 $]))[1] ;
 
 sub _new($$) {
     my ($self,$addr) = @_ ;
@@ -388,7 +388,7 @@ Error (and undef return value) if:
 
 sub new($$) {
     my $class = shift ;
-    my $addr = shift || "" ;
+    my $addr = shift ;
     my $self = {} ;
     _new($self,$addr) ;
     if ( !defined($self->{ADDR}) ) {
