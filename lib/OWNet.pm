@@ -1,7 +1,7 @@
 package OWNet ;
 
 # OWNet module for perl
-# $Id: OWNet.pm,v 1.5 2007/01/27 03:34:39 alfille Exp $
+# $Id: OWNet.pm,v 1.8 2007/02/08 05:14:15 alfille Exp $
 #
 # Paul H Alfille -- copyright 2007
 # Part of the OWFS suite: 
@@ -21,12 +21,6 @@ Dallas Semiconductor's 1-wire system uses simple wiring and unique addresses for
 
 B<OWNet> is a perl module that connects to B<owserver> and allows reading, writing and listing the 1-wire bus.
 
-For instance if we start owserver with:
-
- owserver -d /dev/ttyS0 -p 3000
-
-I<Serial 1-wire adapter attached to a 1-wire bus with a DS18S20 temperature sensor.>
-
 Then the following perl program prints the temperature:
 
  use OWNet ;
@@ -35,7 +29,7 @@ Then the following perl program prints the temperature:
 There is the alternative object oriented form:
 
  use OWNet ;
- my $owserver = OWNET->new( "localhost:3000" ) ;
+ my $owserver = OWNET->new( "localhost:4304" ) ;
  print $owserver->read( "/10.67C6697351FF/temperature" ) ."\n" ; 
 
 =head1 SYNTAX
@@ -46,31 +40,27 @@ There is the alternative object oriented form:
 
 =item B<new>
 
-my $ownet = OWNet::B<new>( I<address> ) ;
+ my $owserver = OWNet -> new( address ) ;
 
 =item B<read>
 
-B<read>( I<address> , I<path> )
-
-$ownet->B<read>( I<path> )
+ read( address, path )
+ $owserver -> read( path )
 
 =item B<write>
 
-B<write>( I<address> , I<path> , I<value> )
-
-$ownet->B<write>( I<path> , I<value> )
+ write( address, path, value )
+ $owserver -> write( path, value )
 
 =item B<dir>
 
-B<dir>( I<address> , I<path> )
-
-$ownet->B<dir>( I<path> )
+ dir( address, path )
+ $owserver -> dir( path )
 
 =item B<present>
 
-B<present>( I<address> , I<path> )
-
-$ownet->B<present>( I<path> )
+ present( address, path )
+ $owserver -> present( path )
 
 =back
 
@@ -180,7 +170,11 @@ my $persistence_bit = 0x04 ;
 my $default_sg = 0x102 ;
 my $default_block = 4096 ;
 
-our $VERSION=(split(/ /,q[$Revision: 1.5 $]))[1] ;
+#if ( !defined(&MSG_DONTWAIT) ) {
+#  sub MSG_DONTWAIT { return 0 ; }
+#}
+
+our $VERSION=(split(/ /,q[$Revision: 1.8 $]))[1] ;
 
 sub _new($$) {
     my ($self,$addr) = @_ ;
@@ -214,8 +208,14 @@ sub _new($$) {
     $addr =~ s/-[\w\.]*//g ;
     $addr =~ s/ //g ;
 
-    $addr = "127.0.0.1:".$addr unless $addr =~ /:/ ;
-    $addr = "127.0.0.1".$addr if $addr =~ /^:/ ;
+    if ( $addr =~ /:/ ) {
+      $addr = "127.0.0.1".$addr if $addr =~ /^:/ ;
+      $addr = $addr."4304" if $addr =~ /:$/ ;
+    } elsif ( $addr =~/\./ ) {
+      $addr .= ":4304" ;
+    } elsif ( $addr eq "localhost" ) {
+      $addr .= ":4304" ;
+    }
 
     $self->{ADDR} = $addr ;
     $self->{SG} = $default_sg + $tempscale + $format ;
@@ -302,13 +302,15 @@ sub _ToServer ($$$$$;$) {
     my $message = pack($f,$self->{VER},$payload_length,$msg_type,$self->{SG}|$self->{PERSIST},$size,$offset,$payload_data) ;
 
     # try to send
-    send( $self->{SOCK}, $message, MSG_DONTWAIT ) && return 1 ;
+#    send( $self->{SOCK}, $message, MSG_DONTWAIT ) && return 1 ;
+    send( $self->{SOCK}, $message, 0 ) && return 1 ;
 
     # maybe bad persistent connection
     if ( $self->{PERSIST} != 0 ) {
         $self->{SOCK} = undef ;
         _Sock($self) || return ;
-        send( $self->{SOCK}, $message, MSG_DONTWAIT ) && return 1 ;
+#        send( $self->{SOCK}, $message, MSG_DONTWAIT ) && return 1 ;
+        send( $self->{SOCK}, $message, 0 ) && return 1 ;
     }
 
 	warn("Send problem $! \n") if $self->{VERBOSE} ;
@@ -330,7 +332,8 @@ sub _FromServerLow($$) {
         return if vec($selectreadbits,$fileno,1) == 0 ;
     #	return if $sel->can_read(1) == 0 ;
         my $partialread ;
-        defined( recv( $self->{SOCK}, $partialread, $remaininglength, MSG_DONTWAIT ) ) || do {
+#        defined( recv( $self->{SOCK}, $partialread, $remaininglength, MSG_DONTWAIT ) ) || do {
+        defined( recv( $self->{SOCK}, $partialread, $remaininglength, 0 ) ) || do {
             warn("Trouble getting data back $! after $remaininglength of $length_wanted") if $self->{VERBOSE} ;
             return ;
         } ;
@@ -359,8 +362,8 @@ sub _FromServer($) {
     } while $payload_length > 66000 ;
     $payload_data = _FromServerLow( $self,$payload_length ) ;
     if ( !defined($payload_data) ) { 
-	warn("Trouble getting payload $!") if $self->{VERBOSE} ;
-	return ;
+    	warn("Trouble getting payload $!") if $self->{VERBOSE} ;
+      return ;
     } ;
     $payload_data = substr($payload_data,0,$size) ;
     #print "From Server, payload retrieved <$dat> \n" ;
@@ -436,7 +439,8 @@ sub read($$) {
     my $path = shift ;
     _ToServer($self,length($path)+1,$msg_read,$default_block,0,$path) ;
 	my @r = _FromServer($self) ;
-	return $r[6] ;
+		return if !@r ;
+  	return $r[6] ;
 }
 
 =item I<write>
@@ -483,6 +487,7 @@ sub write($$$) {
 	my $payload = pack( 'Z'.$path_length.'A'.$value_length,$path,$val ) ;
 	_ToServer($self,length($payload),$msg_write,$value_length,0,$payload) ;
 	my @r = _FromServer($self) ;
+		return if !@r ;
 	return $r[2]>=0 ;
 }
 
@@ -523,6 +528,7 @@ sub present($$) {
     my $path = shift ;
 	_ToServer($self,length($path)+1,$msg_presence,$default_block,0,$path) ;
 	my @r = _FromServer($self) ;
+		return if !@r ;
 	return $r[2]>=0 ;
 }
 
@@ -575,8 +581,8 @@ sub dir($$) {
     _ToServer($self,length($path)+1,$msg_dir,$default_block,0,$path) || return ;
 	my $dirlist = '' ;
 	while (1) {
-		@r = _FromServer($self) ;
-		if (!@r) { return ; } ;
+		@r = _FromServer($self) || return ;
+		return if !@r ;
         if ( $r[1] == 0 ) { # last null packet
             $self->{SOCK} = undef if $self->{PERSIST} == 0 ;
             return substr($dirlist,1) ; # not starting comma
@@ -610,7 +616,63 @@ B<OWNet> is a light-weight module. It connects only to an B<owserver>, does not 
 
 =head2 Object-oriented
 
-I<OWNet> can be used in either a classical (non-object-oriented) manner, or with objects. The object stored the ip address of the B<owserver> and a network socket to communicate.
+I<OWNet> can be used in either a classical (non-object-oriented) manner, or with objects. The object stored the ip address of the B<owserver> and a network socket to communicate. I<OWNet> will use persistent tcp connections for the object form -- potentially a performance boost over a slow network.
+
+=head1 EXAMPLES
+
+=head2 owserver
+
+owserver is a separate process that must be accessible on the network. It allows multiple clients, and can connect to many physical 1-wire adapters and 1-wire devices. It's address must be discoverable -- either set on the command line, or at it's default location, or by using Bonjour (zeroconf) service discovery.
+
+An example owserver invocation for a serial adapter and explicitly the default port:
+
+ owserver -d /dev/ttyS0 -p 4304
+
+=head2 OWNet
+
+ use OWNet ;
+ 
+ # Create owserver object
+ my $owserver = OWNet->new('localhost:4304 -v -F') ; #default location, verbose errors, Fahrenheit degrees
+ # my $owserver = OWNet->new() ; #simpler, again default location, no error messages, default Celsius
+
+ #print directory
+ print $owserver->dir('/') ;
+
+ #print temperature from known device (DS18S20,  ID: 10.13224366A280)
+ print "Temperature: ".$owserver->read('/uncached/10.13224366A280/temperature') ;
+
+ # Now for some fun -- a tree of everything:
+ sub Tree($$) {
+   my $ow = shift ;
+   my $path = shift ;
+
+   print "$path\t" ;
+  
+   # first try to read
+   my $value = $ow->read($path) ;
+   if ( defined($value) ) { 
+     print "$value\n"; 
+     return ;
+   } 
+
+   # not readable, try as directory
+   my $dirstring = $ow->dir($path) ;
+   if ( defined($dirstring) ) { 
+     print "<directory>\n" ; 
+     my @dir = split /,/ ,  $ow->dir($path) ;
+     foreach (@dir) {
+        Tree($ow,$_) ;
+     }
+     return ;
+   }
+  
+   # can't read, not directory
+   print "<write-only>\n" ;
+   return ;
+ }
+
+ Tree( $owserver, '/' ) ;
 
 =head1 INTERNALS
 
@@ -626,7 +688,7 @@ Flag sent to server, and returned, that encodes temperature scale and display fo
 
 =item VERBOSE
 
-Print errors? Corresponds to "-v" in object invocation.
+Print error messages? Set by "-v" in object invocation.
 
 =item SOCK
 
@@ -656,11 +718,11 @@ Reads a specified length from server
 
 =item _FromServer
 
-Reads whole packet from server, usung _FromServerLow (first for header, then payload/tokens). Discards ping packets silently.
+Reads whole packet from server, using _FromServerLow (first for header, then payload/tokens). Discards ping packets silently.
 
 =item _DefaultLookup
 
-Uses the IANA allocated well known port for owserver. First looks in /etc/services, then just tries 4304.
+Uses the IANA allocated well known port (4304) for owserver. First looks in /etc/services, then just tries 4304.
 
 =item _BonjourLookup
 
@@ -676,7 +738,7 @@ Paul H Alfille paul.alfille @ gmail . com
 
 =head1 BUGS
 
-Support for proper timeout using the "select" function seems broken in perl. This leaves the routines vulnerable to network timing errors.
+Support for proper timeout using the "select" function seems broken in perl. This might leave the routines vulnerable to network timing errors.
 
 =head1 SEE ALSO
 
