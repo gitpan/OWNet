@@ -1,10 +1,10 @@
 package OWNet ;
 
 # OWNet module for perl
-# $Id: OWNet.pm,v 1.8 2007/02/08 05:14:15 alfille Exp $
+# $Id: OWNet.pm,v 1.20 2010/06/14 20:10:18 alfille Exp $
 #
 # Paul H Alfille -- copyright 2007
-# Part of the OWFS suite: 
+# Part of the OWFS suite:
 #  http://www.owfs.org
 #  http://owfs.sourceforge.net
 
@@ -17,20 +17,20 @@ Light weight access to B<owserver>
 
 OWNet is an easy way to access B<owserver> and thence the 1-wire bus.
 
-Dallas Semiconductor's 1-wire system uses simple wiring and unique addresses for it's interesting devices. The B<One Wire File System> is a suite of programs that hides 1-wire details behind a file system metaphor. B<owserver> connects to the 1-wire bus and provides network access.
+Dallas Semiconductor's 1-wire system uses simple wiring and unique addresses for its interesting devices. The B<One Wire File System (OWFS)> is a suite of programs that hide 1-wire details behind a file system metaphor. B<owserver> connects to the 1-wire bus and provides network access.
 
 B<OWNet> is a perl module that connects to B<owserver> and allows reading, writing and listing the 1-wire bus.
 
-Then the following perl program prints the temperature:
+Example perl program that prints the temperature:
 
  use OWNet ;
- print OWNET::read( "localhost:3000" , "/10.67C6697351FF/temperature" ) ."\n" ; 
+ print OWNet::read( "localhost:4304" , "/10.67C6697351FF/temperature" ) ."\n" ;
 
 There is the alternative object oriented form:
 
  use OWNet ;
- my $owserver = OWNET->new( "localhost:4304" ) ;
- print $owserver->read( "/10.67C6697351FF/temperature" ) ."\n" ; 
+ my $owserver = OWNet->new( "localhost:4304" ) ;
+ print $owserver->read( "/10.67C6697351FF/temperature" ) ."\n" ;
 
 =head1 SYNTAX
 
@@ -44,23 +44,18 @@ There is the alternative object oriented form:
 
 =item B<read>
 
- read( address, path )
- $owserver -> read( path )
+ OWNet::read( address, path [,size [,offset]] )
+ $owserver -> read( path [,size [,offset]] )
 
 =item B<write>
 
- write( address, path, value )
- $owserver -> write( path, value )
+ OWNet::write( address, path, value [,offset] )
+ $owserver -> write( path, value [,offset] )
 
 =item B<dir>
 
- dir( address, path )
+ OWNet::dir( address, path )
  $owserver -> dir( path )
-
-=item B<present>
-
- present( address, path )
- $owserver -> present( path )
 
 =back
 
@@ -70,15 +65,19 @@ TCP/IP I<address> of B<owserver>. Valid forms:
 
 =over
 
-=item I<name> test.owfs.net:3001
+=item I<name> test.owfs.net:4304
 
-=item I<quad> number: 123.231.312.213:3001
+=item I<quad> number: 123.231.312.213:4304
 
-=item I<host> localhost:3001
+=item I<host> localhost:4304
 
-=item I<port> 3001
+=item I<port> 4304
 
 =back
+
+=head2 I<additional arguments>
+
+Additional arguments to add to address
 
 Temperature scale can also be specified in the I<address>. Same syntax as the other OWFS programs:
 
@@ -91,6 +90,24 @@ Temperature scale can also be specified in the I<address>. Same syntax as the ot
 =item -K Kelvin
 
 =item -R Rankine
+
+=back
+
+Pressure scale can also be specified in the I<address>. Same syntax as the other OWFS programs:
+
+=over
+
+=item --mbar     millibar (default)
+
+=item --atm      atmosphere
+
+=item --mmHg     mm Mercury
+
+=item --inHg     inch Mercury
+
+=item --psi      pounds per inch^2
+
+=item --Pa       pascal
 
 =back
 
@@ -112,7 +129,15 @@ Device display format (1-wire unique address) can also be specified in the I<add
 
 =back
 
-Warning messages will only be display if verbose flag is specified in I<address>
+Show directories that are themselves directories with a '/' suffix ( e.g. /10.67C6697351FF/ )
+
+=over
+
+=item -slash  show directory elements
+
+=back
+
+Warning messages will only be displayed if verbose flag is specified in I<address>
 
 =over
 
@@ -154,221 +179,247 @@ BEGIN { }
 
 use 5.008 ;
 use warnings ;
-use strict ;	
+use strict ;
 
 use IO::Socket::INET ;
 use bytes ;
 
-my $msg_read = 2 ;
-my $msg_write = 3 ;
-my $msg_dir = 4 ;
-my $msg_presence = 6 ;
-my $msg_dirall = 7 ;
-my $msg_get = 8 ;
+my $MSG_READ = 2 ;
+my $MSG_WRITE = 3 ;
+my $MSG_DIR = 4 ;
+my $MSG_PRESENCE = 6 ;
+my $MSG_DIRALL = 7 ;
+my $MSG_DIRALLSLASH = 9 ;
 
-my $persistence_bit = 0x04 ;
-my $default_sg = 0x102 ;
-my $default_block = 4096 ;
+# return value should be negative for error, but the networking layer uses 32bit unsigned integers. This is the boundary.
+my $MAX_RETURN = 66000 ;
+# Network timeout in ms
+my $MAX_WAIT = 3000 ;
+my $RECV_FLAGS = 0 ;
+my $SEND_FLAGS = 0 ;
+my $NO_OFFSET = 0 ;
 
-#if ( !defined(&MSG_DONTWAIT) ) {
-#  sub MSG_DONTWAIT { return 0 ; }
-#}
+my $PERSISTENCE_BIT = 0x04 ;
+# PresenceCheck, Return bus list,  and apply aliases
+my $DEFAULT_SG = 0x100 + 0x2 + 0x8 ;
+my $DEFAULT_BLOCK_LENGTH = 33000 ;
 
-our $VERSION=(split(/ /,q[$Revision: 1.8 $]))[1] ;
+our $VERSION=(split(/ /,q[$Revision: 1.20 $]))[1] ;
 
 sub _new($$) {
-    my ($self,$addr) = @_ ;
+	my ($self,$addr) = @_ ;
 
-    my $tempscale = 0 ;
-    TEMPSCALE: {
-        $tempscale = 0x00000 , last TEMPSCALE if $addr =~ /-C/ ;
-        $tempscale = 0x10000 , last TEMPSCALE if $addr =~ /-F/ ;
-        $tempscale = 0x20000 , last TEMPSCALE if $addr =~ /-K/ ;
-        $tempscale = 0x30000 , last TEMPSCALE if $addr =~ /-R/ ;
-    }
+	$addr =~ s/--/-/g ;
 
-    my $format = 0 ;
-    FORMAT: {
-        $format = 0x2000000 , last FORMAT if $addr =~ /-ff\.i\.c/ ;
-        $format = 0x4000000 , last FORMAT if $addr =~ /-ffi\.c/ ;
-        $format = 0x3000000 , last FORMAT if $addr =~ /-ff\.ic/ ;
-        $format = 0x5000000 , last FORMAT if $addr =~ /-ffic/ ;
-        $format = 0x0000000 , last FORMAT if $addr =~ /-ff\.i/ ;
-        $format = 0x1000000 , last FORMAT if $addr =~ /-ffi/ ;
-        $format = 0x2000000 , last FORMAT if $addr =~ /-f\.i\.c/ ;
-        $format = 0x4000000 , last FORMAT if $addr =~ /-fi\.c/ ;
-        $format = 0x3000000 , last FORMAT if $addr =~ /-f\.ic/ ;
-        $format = 0x5000000 , last FORMAT if $addr =~ /-fic/ ;
-        $format = 0x0000000 , last FORMAT if $addr =~ /-f\.i/ ;
-        $format = 0x1000000 , last FORMAT if $addr =~ /-fi/ ;
-    }
+	my $tempscale = 0 ;
+	TEMPSCALE: {
+		$tempscale = 0x00000 , last TEMPSCALE if $addr =~ /-C/ ;
+		$tempscale = 0x10000 , last TEMPSCALE if $addr =~ /-F/ ;
+		$tempscale = 0x20000 , last TEMPSCALE if $addr =~ /-K/ ;
+		$tempscale = 0x30000 , last TEMPSCALE if $addr =~ /-R/ ;
+	}
 
-	$self->{VERBOSE} = 1 if $addr =~ /-v/ ;
+	my $presscale = 0 ;
+	PRESSCALE: {
+		$presscale = 0x000000 , last PRESSCALE if $addr =~ /-mbar/i ;
+		$presscale = 0x040000 , last PRESSCALE if $addr =~ /-atm/i ;
+		$presscale = 0x080000 , last PRESSCALE if $addr =~ /-mmhg/i ;
+		$presscale = 0x0C0000 , last PRESSCALE if $addr =~ /-inhg/i ;
+		$presscale = 0x100000 , last PRESSCALE if $addr =~ /-psi/i ;
+		$presscale = 0x140000 , last PRESSCALE if $addr =~ /-pa/i ;
+	}
 
-    $addr =~ s/-[\w\.]*//g ;
-    $addr =~ s/ //g ;
+	my $format = 0 ;
+	FORMAT: {
+		$format = 0x2000000 , last FORMAT if $addr =~ /-ff\.i\.c/ ;
+		$format = 0x4000000 , last FORMAT if $addr =~ /-ffi\.c/ ;
+		$format = 0x3000000 , last FORMAT if $addr =~ /-ff\.ic/ ;
+		$format = 0x5000000 , last FORMAT if $addr =~ /-ffic/ ;
+		$format = 0x0000000 , last FORMAT if $addr =~ /-ff\.i/ ;
+		$format = 0x1000000 , last FORMAT if $addr =~ /-ffi/ ;
+		$format = 0x2000000 , last FORMAT if $addr =~ /-f\.i\.c/ ;
+		$format = 0x4000000 , last FORMAT if $addr =~ /-fi\.c/ ;
+		$format = 0x3000000 , last FORMAT if $addr =~ /-f\.ic/ ;
+		$format = 0x5000000 , last FORMAT if $addr =~ /-fic/ ;
+		$format = 0x0000000 , last FORMAT if $addr =~ /-f\.i/ ;
+		$format = 0x1000000 , last FORMAT if $addr =~ /-fi/ ;
+	}
 
-    if ( $addr =~ /:/ ) {
-      $addr = "127.0.0.1".$addr if $addr =~ /^:/ ;
-      $addr = $addr."4304" if $addr =~ /:$/ ;
-    } elsif ( $addr =~/\./ ) {
-      $addr .= ":4304" ;
-    } elsif ( $addr eq "localhost" ) {
-      $addr .= ":4304" ;
-    }
+	# Verbose flag
+	$self->{VERBOSE} = 1 if $addr =~ /-v/i ;
+	
+	# slash after directory elements
+	$self->{SLASH} = 1 if $addr =~ /-slash/i ;
 
-    $self->{ADDR} = $addr ;
-    $self->{SG} = $default_sg + $tempscale + $format ;
-    $self->{VER} = 0 ;
+	$addr =~ s/-[\w\.]*//g ;
+	$addr =~ s/ //g ;
+
+	my $port ;
+	if ( $addr =~ /(.*):(.*)/ ) {
+		$addr = $1 ;
+		$port = $2 ;
+	} elsif ( $addr =~/\D/ ) {
+		$port = '' ;
+	} else {
+		$port = $addr ;
+		$addr = '' ;
+	}
+
+	$self->{ADDR} = $addr ;
+	$self->{PORT} = $port ;
+	$self->{SG} = $DEFAULT_SG + $tempscale + $presscale + $format ;
+	$self->{VER} = 1 ;
 }
 
 sub _Sock($) {
-    my $self = shift ;
-    # persistent socket already there?
-    if ( defined($self->{SOCK} && $self->{PERSIST} != 0  ) ) { 
-        return 1 ; 
-    }
-    # New socket
-    $self->{SOCK} = IO::Socket::INET->new(PeerAddr=>$self->{ADDR},Proto=>'tcp') || do {
-        warn("Can't open $self->{ADDR} ($!) \n") if $self->{VERBOSE} ;
-        $self->{SOCK} = undef ;
-        return ;
-    } ;
-    return 1 ;
+	my $self = shift ;
+
+	# persistent socket already there?
+	if ( defined($self->{SOCK} && $self->{PERSIST} != 0  ) ) {
+		return 1 ;
+	}
+
+	# defaults
+	my $addr = $self->{ADDR} ;
+	my $port = $self->{PORT} ;
+	$addr = '127.0.0.1' if $addr eq '' ;
+	$port = 'owserver(4304)' if $port eq '' ;
+
+	# New socket
+	$self->{SOCK} = IO::Socket::INET->new(
+	    PeerAddr=>$addr,
+	    PeerPort=>$port,
+	    Proto=>'tcp')
+	|| do {
+		warn("Can't open $addr:$port ($!) \n") if $self->{VERBOSE} ;
+		$self->{SOCK} = undef ;
+		return ;
+	} ;
+	return 1 ;
 }
 
 sub _self($) {
-    my $addr = shift ;
-    my $self ;
-    if ( ref($addr) ) {
-        $self = $addr ;
-        $self->{PERSIST} = $persistence_bit ;
-    } else {
-        $self = {} ;
-        _new($self,$addr)  ;
-        $self->{PERSIST} = 0 ;
-    }
-    if ( $self->{ADDR} =~ // ) {
-        _DefaultLookup($self) || _BonjourLookup($self) || return ;
-    } else {
-        _Sock($self) || return ;
-    }
-    return $self;
-}
+	my $addr = shift ;
+	my $self ;
 
-sub _DefaultLookup($) {
-    my $self = shift ;
-    # New socket
-    $self->{SOCK} = IO::Socket::INET->new(PeerAddr=>"localhost:owserver(4304)",Proto=>'tcp') || do {
-        warn("Can't open default port ($!) \n") if $self->{VERBOSE} ;
-        $self->{SOCK} = undef ;
-        return ;
-    } ;
-    $self->{ADDR} = $self->{SOCK}->peeraddr.":".$self->{SOCK}->peerport ;
-    return 1 ;
+	if ( ref($addr) ) {
+		$self = $addr ;
+		$self->{PERSIST} = $PERSISTENCE_BIT ;
+	} else {
+		$self = {} ;
+		_new($self,$addr)  ;
+		$self->{PERSIST} = 0 ;
+	}
+
+	if ( ($self->{ADDR} eq '') && ($self->{PORT} eq '') ) {
+		_BonjourLookup($self) || _Sock($self) || return ;
+	} else {
+		_Sock($self) || return ;
+	}
+	return $self;
 }
 
 sub _BonjourLookup($) {
-    my $self = shift ;
-    eval { require Net::Rendezvous; }; 
-    if ($@) { 
-        print "$@\n" if $self->{VERBOSE} ;
-        return ;
-    }
-    my $owservers = Net::Rendezvous->new('owserver') || do {
-        print "Unable to start owserver discovery via Net::Rendezvous $!\n" if $self->{VERBOSE} ;
-        return ;
-    } ;
-    $owservers->discover ;
-    my $owserver_selected = $owservers->shift_entry || do {
-        print "No owserver discovered by Net::Rendezvous\n" if $self->{VERBOSE} ;
-        return ;
-    } ;
-    print $owserver_selected->host.":".$owserver_selected->port."\n" ;
-    # New socket
-    $self->{SOCK} = IO::Socket::INET->new(PeerAddr=>$owserver_selected->host,PeerPort=>$owserver_selected->port,Proto=>'tcp') || do {
-        warn("Can't open Bonjour (autodiscovered) port ($!) \n") if $self->{VERBOSE} ;
-        $self->{SOCK} = undef ;
-        return ;
-    } ;
-    $self->{ADDR} = $self->{SOCK}->peeraddr.":".$self->{SOCK}->peerport ;
-    return 1 ;
+	my $self = shift ;
+
+	eval { require Net::Rendezvous; };
+	if ($@) {
+		print "$@\n" if $self->{VERBOSE} ;
+		return ;
+	}
+
+	my $owservers = Net::Rendezvous->new('owserver') || do {
+		print "Unable to start owserver discovery via Net::Rendezvous $!\n" if $self->{VERBOSE} ;
+		return ;
+	} ;
+
+	$owservers->discover ;
+	my $owserver_selected = $owservers->shift_entry || do {
+		print "No owserver discovered by Net::Rendezvous\n" if $self->{VERBOSE} ;
+		return ;
+	} ;
+	print $owserver_selected->host.":".$owserver_selected->port."\n" if $self->{VERBOSE} ;
+
+	# New socket
+	$self->{SOCK} = IO::Socket::INET->new(PeerAddr=>$owserver_selected->host,PeerPort=>$owserver_selected->port,Proto=>'tcp') || do {
+		warn("Can't open Bonjour (autodiscovered) port ($!) \n") if $self->{VERBOSE} ;
+		$self->{SOCK} = undef ;
+	return ;
+	} ;
+	$self->{ADDR} = $self->{SOCK}->peeraddr ;
+	$self->{PORT} = $self->{SOCK}->peerport ;
+	return 1 ;
 }
 
-sub _ToServer ($$$$$;$) {
-    my ($self, $payload_length, $msg_type, $size, $offset, $payload_data) = @_ ;
-    my $f = "N6" ;
-    $f .= 'Z'.$payload_length if ( $payload_length > 0 ) ; 
-    my $message = pack($f,$self->{VER},$payload_length,$msg_type,$self->{SG}|$self->{PERSIST},$size,$offset,$payload_data) ;
+sub _ToServer ($$$$;$) {
+	my ($self, $msg_type, $size, $offset, $payload_data) = @_ ;
+	my $f = "N6" ;
+	my $payload_length = length($payload_data) + 1 ;
+	$f .= 'Z'.$payload_length ;
+	my $message = pack($f,$self->{VER},$payload_length,$msg_type,$self->{SG}|$self->{PERSIST},$size,$offset,$payload_data) ;
 
-    # try to send
-#    send( $self->{SOCK}, $message, MSG_DONTWAIT ) && return 1 ;
-    send( $self->{SOCK}, $message, 0 ) && return 1 ;
+	# try to send
+	send( $self->{SOCK}, $message, $SEND_FLAGS ) && return 1 ;
 
-    # maybe bad persistent connection
-    if ( $self->{PERSIST} != 0 ) {
-        $self->{SOCK} = undef ;
-        _Sock($self) || return ;
-#        send( $self->{SOCK}, $message, MSG_DONTWAIT ) && return 1 ;
-        send( $self->{SOCK}, $message, 0 ) && return 1 ;
-    }
+	# maybe bad persistent connection
+	if ( $self->{PERSIST} != 0 ) {
+		$self->{SOCK} = undef ;
+		_Sock($self) || return ;
+		send( $self->{SOCK}, $message, $SEND_FLAGS ) && return 1 ;
+	}
 
 	warn("Send problem $! \n") if $self->{VERBOSE} ;
 	return ;
 }
 
-sub _FromServerLow($$) {
-    my $self = shift ;
-    my $length_wanted = shift ;
-    return '' if $length_wanted == 0 ;
-    my $fileno = $self->{SOCK}->fileno ;
-    my $selectreadbits = '' ;
-    vec($selectreadbits,$fileno,1) = 1 ;
-    my $remaininglength = $length_wanted ;
-    my $fullread = '' ;
-    #print "LOOOP for length $length \n" ;
-    do {
-        select($selectreadbits,undef,undef,1) ;
-        return if vec($selectreadbits,$fileno,1) == 0 ;
-    #	return if $sel->can_read(1) == 0 ;
-        my $partialread ;
-#        defined( recv( $self->{SOCK}, $partialread, $remaininglength, MSG_DONTWAIT ) ) || do {
-        defined( recv( $self->{SOCK}, $partialread, $remaininglength, 0 ) ) || do {
-            warn("Trouble getting data back $! after $remaininglength of $length_wanted") if $self->{VERBOSE} ;
-            return ;
-        } ;
-        #print "reading=".$a."\n";
-        #print " length a=".length($a)." length ret=".length($ret)." length a+ret=".length($a.$ret)." \n" ;
-        $fullread .= $partialread ;
-        $remaininglength = $length_wanted - length($fullread) ;
-        #print "_FromServerLow (a.len=".length($a)." $len of $length \n" ;
-    } while $remaininglength > 0 ;
-    return $fullread ;
+sub _FromServerBinaryParse($$) {
+	my $self = shift ;
+
+	my $length_wanted = shift ;
+	return '' if $length_wanted == 0 ;
+
+	my $fileno = $self->{SOCK}->fileno ;
+	my $selectreadbits = '' ;
+	vec($selectreadbits,$fileno,1) = 1 ;
+
+	my $remaininglength = $length_wanted ;
+	my $fullread = '' ;
+	do {
+		select($selectreadbits,undef,undef,$MAX_WAIT) ;
+		return if vec($selectreadbits,$fileno,1) == 0 ;
+		my $partialread ;
+		defined( recv( $self->{SOCK}, $partialread, $remaininglength, $RECV_FLAGS ) ) || do {
+			warn("Trouble getting data back $! after $remaininglength of $length_wanted") if $self->{VERBOSE} ;
+			return ;
+		} ;
+		$fullread .= $partialread ;
+		$remaininglength = $length_wanted - length($fullread) ;
+	} while $remaininglength > 0 ;
+
+	return $fullread ;
 }
 
 sub _FromServer($) {
-    my $self = shift ;
-    my ( $version, $payload_length, $return_status, $sg, $size, $offset, $payload_data ) ;
-    do {
-	my $r = _FromServerLow( $self,24 ) || do {
-	    warn("Trouble getting header $!") if $self->{VERBOSE} ;
-	    return ;
+	my $self = shift ;
+	my ( $version, $payload_length, $return_status, $sg, $size, $offset, $payload_data ) ;
+
+	do {
+		my $r = _FromServerBinaryParse( $self,24 ) || do {
+			warn("Trouble getting header $!") if $self->{VERBOSE} ;
+			return ;
+		} ;
+		($version, $payload_length, $return_status, $sg, $size, $offset) = unpack('N6', $r ) ;
+		return if $return_status > $MAX_RETURN ;
+	} while $payload_length > $MAX_RETURN ;
+
+	$payload_data = _FromServerBinaryParse( $self,$payload_length ) ;
+	if ( !defined($payload_data) ) {
+		warn("Trouble getting payload $!") if $self->{VERBOSE} ;
+		return ;
 	} ;
-	($version, $payload_length, $return_status, $sg, $size, $offset) = unpack('N6', $r ) ;
-	# returns unsigned (though originals signed
-	# assume anything above 66000 is an error
-	return if $return_status > 66000 ;
-	#print "From Server, size = $siz, ret = $ret payload = $pay \n" ;
-    } while $payload_length > 66000 ;
-    $payload_data = _FromServerLow( $self,$payload_length ) ;
-    if ( !defined($payload_data) ) { 
-    	warn("Trouble getting payload $!") if $self->{VERBOSE} ;
-      return ;
-    } ;
-    $payload_data = substr($payload_data,0,$size) ;
-    #print "From Server, payload retrieved <$dat> \n" ;
-    $self->{PERSIST} = $sg & $persistence_bit ;
-    return ($version, $payload_length, $return_status, $sg, $size, $offset, $payload_data ) ;
+	$payload_data = substr($payload_data,0,$size) ;
+	$self->{PERSIST} = $sg & $PERSISTENCE_BIT ;
+	return ($version, $payload_length, $return_status, $sg, $size, $offset, $payload_data ) ;
 }
 
 =item I<new>
@@ -385,20 +436,22 @@ Error (and undef return value) if:
 
 =item 2 No <B>owserver at I<address>
 
+=item
+
 =back
 
 =cut
 
 sub new($$) {
-    my $class = shift ;
-    my $addr = shift || "" ;
-    my $self = {} ;
-    _new($self,$addr) ;
-    if ( !defined($self->{ADDR}) ) {
-        return ;
-    } ;
-    bless $self, $class ;
-    return $self ;
+	my $class = shift ;
+	my $addr = shift || "" ;
+	my $self = {} ;
+	_new($self,$addr) ;
+	if ( !defined($self->{ADDR}) ) {
+		return ;
+	} ;
+	bless $self, $class ;
+	return $self ;
 }
 
 =item I<read>
@@ -407,16 +460,20 @@ sub new($$) {
 
 =item Non object-oriented:
 
-B<read>( I<address> , I<path> )
+B<OWNet::read>( I<address> , I<path> [ , size [ , offset ] ] )
 
 =item Object-oriented:
 
-$ownet->B<read>( I<path> )
+$ownet->B<read>( I<path> [ , size [ , offset ] ] )
 
 =back
 
 
 Read the value of a 1-wire device property. Returns the (scalar string) value of the property.
+
+Size (number of bytes to read) is optional
+
+Offset (number of bytes from start of field to start write) is optional
 
 Error (and undef return value) if:
 
@@ -426,21 +483,28 @@ Error (and undef return value) if:
 
 =item 2 (Object form) Not called with a valid OWNet object
 
-=item 3 Bad I<path> 
+=item 3 Bad I<path>
 
 =item 4 I<path> not a readable device property
+
+=item
 
 =back
 
 =cut
 
 sub read($$) {
-    my $self = _self(shift) || return ;
-    my $path = shift ;
-    _ToServer($self,length($path)+1,$msg_read,$default_block,0,$path) ;
+	my $self = _self(shift) || return ;
+	my $path = shift ;
+	my $read_length = shift || $DEFAULT_BLOCK_LENGTH ;
+	my $offset = shift || $NO_OFFSET ;
+
+	_ToServer($self,$MSG_READ,$read_length,$offset,$path) ;
 	my @r = _FromServer($self) ;
-		return if !@r ;
-  	return $r[6] ;
+	if ( !@r ) {
+		return ;
+	}
+	return $r[6] ;
 }
 
 =item I<write>
@@ -449,16 +513,18 @@ sub read($$) {
 
 =item Non object-oriented:
 
-B<write>( I<address> , I<path> , I<value> )
+B<OWNet::write>( I<address> , I<path> , I<value> [ , offset ] )
 
 =item Object-oriented:
 
-$ownet->B<write>( I<path> , I<value> )
+$ownet->B<write>( I<path> , I<value> [ , offset ] )
 
 =back
 
 Set the value of a 1-wire device property. Returns "1" on success.
 
+Offset (number of bytes from start of field to start write) is optional
+
 Error (and undef return value) if:
 
 =over
@@ -467,68 +533,32 @@ Error (and undef return value) if:
 
 =item 2 (Object form) Not called with a valid OWNet object
 
-=item 3 Bad I<path> 
+=item 3 Bad I<path>
 
 =item 4 I<path> not a writable device property
 
 =item 5 I<value> incorrect size or format
 
+=item
+
 =back
 
 =cut
 
-sub write($$$) {
-    my $self = _self(shift) || return ;
-    my $path = shift ;
-    my $val = shift ;
+sub write($$$;$) {
+	my $self = _self(shift) || return ;
+	my $path = shift ;
+	my $val = shift ;
+	my $offset = shift || $NO_OFFSET ;
 
 	my $value_length = length($val) ;
 	my $path_length = length($path)+1 ;
 	my $payload = pack( 'Z'.$path_length.'A'.$value_length,$path,$val ) ;
-	_ToServer($self,length($payload),$msg_write,$value_length,0,$payload) ;
+	_ToServer($self,$MSG_WRITE,$value_length,$offset,$payload) ;
 	my @r = _FromServer($self) ;
-		return if !@r ;
-	return $r[2]>=0 ;
-}
-
-=item I<present>
-
-=over
-
-=item Non object-oriented:
-
-B<present>( I<address> , I<path> )
-
-=item Object-oriented:
-
-$ownet->B<present>( I<path> )
-
-=back
-
-Test if a 1-wire device exists.
-
-Error (and undef return value) if:
-
-=over
-
-=item 1 (Non object) No B<owserver> at I<address>
-
-=item 2 (Object form) Not called with a valid OWNet object
-
-=item 3 Bad I<path> 
-
-=item 4 I<path> not a device
-
-=back
-
-=cut
-
-sub present($$) {
-    my $self = _self(shift) || return ;
-    my $path = shift ;
-	_ToServer($self,length($path)+1,$msg_presence,$default_block,0,$path) ;
-	my @r = _FromServer($self) ;
-		return if !@r ;
+	if ( !@r ) {
+		return;
+	}
 	return $r[2]>=0 ;
 }
 
@@ -556,37 +586,49 @@ Error (and undef return value) if:
 
 =item 2 (Object form) Not called with a valid OWNet object
 
-=item 3 Bad I<path> 
+=item 3 Bad I<path>
 
 =item 4 I<path> not a directory
+
+=item
 
 =back
 
 =cut
 
 sub dir($$) {
-    my $self = _self(shift) || return ;
-    my $path = shift ;
+	my $self = _self(shift) || return ;
+	my $path = shift ;
 
-    # new msg_dirall method -- single packet
-    _ToServer($self,length($path)+1,$msg_dirall,$default_block,0,$path) || return ;
-    my @r = _FromServer($self) ;
-    if (@r) {
-        $self->{SOCK} = undef if $self->{PERSIST} == 0 ;
-        return $r[6] ;
-    } ;
+	# DIRALLSLASH method -- single packet with slash (/) after each dir entry
+	if ( $self->{SLASH}) {
+		_ToServer($self,$MSG_DIRALLSLASH,$DEFAULT_BLOCK_LENGTH,$NO_OFFSET,$path) || return ;
+		my @r = _FromServer($self) ;
+		if (@r) {
+			$self->{SOCK} = undef if $self->{PERSIST} == 0 ;
+			return $r[6] ;
+		} ;
+	}
 
-    # old msg_dir method -- many packets
-    _Sock($self) || return ;
-    _ToServer($self,length($path)+1,$msg_dir,$default_block,0,$path) || return ;
+	# new MSG_DIRALL method -- single packet
+	_ToServer($self,$MSG_DIRALL,$DEFAULT_BLOCK_LENGTH,$NO_OFFSET,$path) || return ;
+	my @r = _FromServer($self) ;
+	if (@r) {
+		$self->{SOCK} = undef if $self->{PERSIST} == 0 ;
+		return $r[6] ;
+	} ;
+
+	# old MSG_DIR method -- many packets
+	_Sock($self) || return ;
+	_ToServer($self,$MSG_DIR,$DEFAULT_BLOCK_LENGTH,$NO_OFFSET,$path) || return ;
 	my $dirlist = '' ;
 	while (1) {
 		@r = _FromServer($self) || return ;
 		return if !@r ;
-        if ( $r[1] == 0 ) { # last null packet
-            $self->{SOCK} = undef if $self->{PERSIST} == 0 ;
-            return substr($dirlist,1) ; # not starting comma
-        }
+	if ( $r[1] == 0 ) { # last null packet
+		$self->{SOCK} = undef if $self->{PERSIST} == 0 ;
+		return substr($dirlist,1) ; # not starting comma
+	}
 		$dirlist .= ','.$r[6] ;
 	}
 }
@@ -595,6 +637,49 @@ sub dir($$) {
 return 1 ;
 
 END { }
+
+=item I<present>
+
+=over
+
+=item Non object-oriented:
+
+B<present>( I<address> , I<path> )
+
+=item Object-oriented:
+
+$ownet->B<present>( I<path> )
+
+=back
+
+Test if a 1-wire device exists.
+
+Error (and undef return value) if:
+
+=over
+
+=item 1 (Non object) No B<owserver> at I<address>
+
+=item 2 (Object form) Not called with a valid OWNet object
+
+=item 3 Bad I<path>
+
+=item 4 I<path> not a device
+
+=item
+
+=back
+
+=cut
+
+sub present($$) {
+	my $self = _self(shift) || return ;
+	my $path = shift ;
+	_ToServer($self,$MSG_PRESENCE,$DEFAULT_BLOCK_LENGTH,$NO_OFFSET,$path) ;
+	my @r = _FromServer($self) ;
+		return if !@r ;
+	return $r[2]>=0 ;
+}
 
 =back
 
@@ -610,7 +695,7 @@ I<1-wire> is a protocol allowing simple connection of inexpensive devices. Each 
 
 =head2 Programs
 
-Connection to the 1-wire bus is either done by bit-banging a digital pin on the processor, or by using a bus master -- USB, serial, i2c, parallel. The heavy-weight I<OWFS> programs: B<owserver> B<owfs> B<owhttpd> B<owftpd> and the heavy-weight perl module B<OW> all link in the full I<OWFS> library and can connect directly to the bus master(s) and/or to B<owserver>.  
+Connection to the 1-wire bus is either done by bit-banging a digital pin on the processor, or by using a bus master -- USB, serial, i2c, parallel. The heavy-weight I<OWFS> programs: B<owserver> B<owfs> B<owhttpd> B<owftpd> and the heavy-weight perl module B<OW> all link in the full I<OWFS> library and can connect directly to the bus master(s) and/or to B<owserver>.
 
 B<OWNet> is a light-weight module. It connects only to an B<owserver>, does not link in the I<OWFS> library, and should be more portable..
 
@@ -631,7 +716,7 @@ An example owserver invocation for a serial adapter and explicitly the default p
 =head2 OWNet
 
  use OWNet ;
- 
+
  # Create owserver object
  my $owserver = OWNet->new('localhost:4304 -v -F') ; #default location, verbose errors, Fahrenheit degrees
  # my $owserver = OWNet->new() ; #simpler, again default location, no error messages, default Celsius
@@ -648,25 +733,25 @@ An example owserver invocation for a serial adapter and explicitly the default p
    my $path = shift ;
 
    print "$path\t" ;
-  
+
    # first try to read
    my $value = $ow->read($path) ;
-   if ( defined($value) ) { 
-     print "$value\n"; 
+   if ( defined($value) ) {
+     print "$value\n";
      return ;
-   } 
+   }
 
    # not readable, try as directory
    my $dirstring = $ow->dir($path) ;
-   if ( defined($dirstring) ) { 
-     print "<directory>\n" ; 
+   if ( defined($dirstring) ) {
+     print "<directory>\n" ;
      my @dir = split /,/ ,  $ow->dir($path) ;
      foreach (@dir) {
         Tree($ow,$_) ;
      }
      return ;
    }
-  
+
    # can't read, not directory
    print "<write-only>\n" ;
    return ;
@@ -678,9 +763,15 @@ An example owserver invocation for a serial adapter and explicitly the default p
 
 =head2 Object properties (All private)
 
+=over
+
 =item ADDR
 
-literal sting for the IP address, in ip:port format. This property is also used to indicate a substantiated object.
+literal sting for the IP address, in dotted-quad or host format. This property is also used to indicate a substantiated object.
+
+=item PORT
+
+string for the port number (or service name). Service name must be specified as :owserver or the like.
 
 =item SG
 
@@ -690,11 +781,19 @@ Flag sent to server, and returned, that encodes temperature scale and display fo
 
 Print error messages? Set by "-v" in object invocation.
 
+=item SLASH
+
+Add "/" to the end of directory entries. Set by "-slash" in object invocation.
+
 =item SOCK
 
 Socket address (object) for communication. Stays defined for persistent connections, else deleted between calls.
 
+=back
+
 =head2 Private methods
+
+=over
 
 =item _self
 
@@ -707,20 +806,20 @@ Takes command line invocation parameters (for an object or not) and properly par
 =item _Sock
 
 Socket processing, including tests for persistence, and opening.
+If no host is specified, localhost (127.0.0.1) is used.
+If no port is specified, uses the IANA allocated well known port (4304) for owserver. First looks in /etc/services, then just tries 4304.
 
 =item _ToServer
 
 Sends formats and sends a message to owserver. If a persistent socket fails, retries after new socket created.
 
-=item _FromServerLow
+=item _FromServerBinaryParse
 
 Reads a specified length from server
 
 =item _FromServer
 
-Reads whole packet from server, using _FromServerLow (first for header, then payload/tokens). Discards ping packets silently.
-
-=item _DefaultLookup
+Reads whole packet from server, using _FromServerBinaryParse (first for header, then payload/tokens). Discards ping packets silently.
 
 Uses the IANA allocated well known port (4304) for owserver. First looks in /etc/services, then just tries 4304.
 
@@ -730,11 +829,13 @@ Uses the mDNS service discovery protocol to find an available owserver.
 Employs NET::Rendezvous (an earlier name or Apple's Bonjour)
 This module is loaded only if available using the method of http://sial.org/blog/2006/12/optional_perl_module_loading.html
 
-Bounjour details for owserver at: 
+Bounjour details for owserver at:
+
+=back
 
 =head1 AUTHOR
 
-Paul H Alfille paul.alfille @ gmail . com
+Paul H Alfille paul.alfille@gmail.com
 
 =head1 BUGS
 
@@ -746,7 +847,7 @@ Support for proper timeout using the "select" function seems broken in perl. Thi
 
 =item http://www.owfs.org
 
-Documentation for the full B<owfs> program suite, including man pages for each of the supported 1-wire devices, nand more extensive explanatation of owfs components.
+Documentation for the full B<owfs> program suite, including man pages for each of the supported 1-wire devices, and more extensive explanatation of owfs components.
 
 =item http://owfs.sourceforge.net
 
